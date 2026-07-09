@@ -61,7 +61,7 @@ function saveLS(key, value) {
   }
 }
 
-// Calls our own backend, which safely talks to Anthropic.
+// Calls our own backend, which safely talks to Tavily server-side (keys never reach the browser).
 async function researchSection(place, section) {
   const res = await fetch("/api/research", {
     method: "POST",
@@ -258,13 +258,13 @@ export default function App() {
     if (loading.overview) return <Skeleton />;
     if (errors.overview) return <ErrorBox msg={errors.overview} onRetry={() => ensureSection(place, "overview")} />;
     if (!overview) return null;
-    const savedHere = isSaved(val(overview.name), "Destination");
-    const savedItem = saved.find((x) => x.name === val(overview.name) && x.category === "Destination");
+    const savedHere = isSaved(val(overview.destination), "Destination");
+    const savedItem = saved.find((x) => x.name === val(overview.destination) && x.category === "Destination");
     return (
       <div>
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="font-serif text-3xl font-semibold text-slate-900">{val(overview.name)}</h1>
+            <h1 className="font-serif text-3xl font-semibold text-slate-900">{val(overview.destination)}</h1>
             <p className="mt-1 flex items-center gap-1.5 text-sm text-slate-500">
               <MapPin className="h-4 w-4" /> {val(overview.location)}
             </p>
@@ -274,17 +274,17 @@ export default function App() {
             label="Save place"
             onClick={() =>
               addSaved({
-                name: val(overview.name),
+                name: val(overview.destination),
                 category: "Destination",
                 location: val(overview.location),
-                whyGo: val(overview.whyVisit),
+                whyGo: val(overview.whyWorthVisiting),
                 area: "",
               })
             }
           />
         </div>
 
-        <p className="mt-4 text-slate-700">{val(overview.description)}</p>
+        <p className="mt-4 text-slate-700">{val(overview.overview)}</p>
 
         {Array.isArray(overview.styleTags) && (
           <div className="mt-4 flex flex-wrap gap-2">
@@ -295,10 +295,10 @@ export default function App() {
         )}
 
         <div className="mt-6 grid gap-4 sm:grid-cols-2">
-          <Card className="p-4"><Field label="Why it is worth visiting">{val(overview.whyVisit)}</Field></Card>
+          <Card className="p-4"><Field label="Why it is worth visiting">{val(overview.whyWorthVisiting)}</Field></Card>
           <Card className="p-4"><Field label="Known for">{val(overview.knownFor)}</Field></Card>
-          <Card className="p-4"><Field label="Best time to visit">{val(overview.bestTime)}</Field></Card>
-          <Card className="p-4"><Field label="Recommended trip length">{val(overview.tripLength)}</Field></Card>
+          <Card className="p-4"><Field label="Best time to visit">{val(overview.bestTimeToVisit)}</Field></Card>
+          <Card className="p-4"><Field label="Recommended trip length">{val(overview.recommendedTripLength)}</Field></Card>
           <Card className="p-4"><Field label="Budget level">{val(overview.budgetLevel)}</Field></Card>
         </div>
 
