@@ -1,24 +1,24 @@
 import React, { useState, useEffect, useCallback } from "react";
 import {
-  Search, MapPin, Bookmark, BookmarkCheck, Trash2, Plus, Calendar,
+  Search, MapPin, Bookmark, BookmarkCheck, Trash2, Calendar,
   Utensils, Bed, Compass, Sparkles, Info, Bus, X, ExternalLink,
   Globe, Gift, ClipboardList, AlertCircle, RefreshCw, Clock, Menu,
-  Copy, Check, Sunrise, Sun, Moon,
+  Copy, Check, Sunrise, Sun, Moon, Wallet, Users, Pencil, Loader2,
 } from "lucide-react";
 
 /* ----------------------------- config ----------------------------- */
 
 const SAVED_KEY = "travel_saved_v1";
-const DAYS_KEY = "travel_days_v1";
+const TRIP_KEY = "travel_trip_v2";
 
 const TABS = [
   { id: "overview", label: "Overview", icon: Info, needsPlace: true },
+  { id: "itinerary", label: "Itinerary", icon: Calendar, needsPlace: true },
   { id: "stay", label: "Stay", icon: Bed, needsPlace: true },
   { id: "do", label: "Do", icon: Compass, needsPlace: true },
   { id: "eat", label: "Eat", icon: Utensils, needsPlace: true },
   { id: "local", label: "Local", icon: Gift, needsPlace: true },
   { id: "logistics", label: "Logistics", icon: Bus, needsPlace: true },
-  { id: "itinerary", label: "Itinerary", icon: Calendar, needsPlace: false },
   { id: "trip", label: "Trip List", icon: ClipboardList, needsPlace: false },
 ];
 
@@ -28,22 +28,32 @@ const PRIO = {
   skip: { label: "Skip", cls: "bg-slate-100 text-slate-500 border-slate-200", dot: "bg-slate-400" },
 };
 
-const SLOTS = [
-  { id: "morning", label: "Morning", icon: Sunrise },
-  { id: "afternoon", label: "Afternoon", icon: Sun },
-  { id: "evening", label: "Evening", icon: Moon },
-  { id: "food", label: "Food stop", icon: Utensils },
+const BUDGETS = [
+  { id: "budget", label: "Budget" },
+  { id: "mid-range", label: "Mid-range" },
+  { id: "luxury", label: "Luxury" },
 ];
+const STYLES = [
+  { id: "relaxed", label: "Relaxed" },
+  { id: "balanced", label: "Balanced" },
+  { id: "packed", label: "Packed" },
+];
+const INTERESTS = ["Food", "Nightlife", "History", "Art & museums", "Nature", "Shopping", "Beaches", "Architecture"];
+const SEASONS = ["", "Spring", "Summer", "Fall", "Winter"];
+
+const SLOT_ICON = { Morning: Sunrise, Afternoon: Sun, Evening: Moon, Food: Utensils };
 
 const EXAMPLES = [
-  "Barcelona", "Rome", "Sagrada Familia", "Amalfi Coast",
-  "Best restaurants in Lisbon", "Where to stay in Madrid",
+  "Madrid, 4 days, mid-budget, food and nightlife",
+  "Lisbon, 3 days, budget, history",
+  "Rome, 5 days, art and food",
+  "Kyoto, 6 days, relaxed, nature",
 ];
 
 /* --------------------------- data helpers -------------------------- */
 
 const uid = () => Math.random().toString(36).slice(2, 9);
-const val = (x) => (x && String(x).trim() ? x : "Needs verification");
+const val = (x) => (x && String(x).trim() ? x : "To be confirmed");
 
 function loadLS(key, fallback) {
   try {
@@ -61,12 +71,68 @@ function saveLS(key, value) {
   }
 }
 
-// Calls our own backend, which safely talks to Tavily server-side (keys never reach the browser).
-async function researchSection(place, section) {
+function defaultTrip(destination = "") {
+  return { destination, days: 3, budget: "mid-range", style: "balanced", interests: [], season: "" };
+}
+
+function tripKey(t) {
+  if (!t || !t.destination) return "";
+  return [t.destination.toLowerCase().trim(), t.days, t.budget, t.style, (t.interests || []).join(","), t.season].join("|");
+}
+
+// Parse a natural-language search like:
+// "Madrid, 4 days, mid-budget, food and nightlife"
+function parseTripQuery(raw) {
+  const text = cleanStr(raw);
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  const parts = text.split(",").map((s) => s.trim()).filter(Boolean);
+  const trip = defaultTrip(parts[0] || text);
+
+  const dayMatch = lower.match(/(\d+)\s*(?:day|days|d)\b/);
+  if (dayMatch) trip.days = Math.min(10, Math.max(1, parseInt(dayMatch[1], 10)));
+
+  if (/\b(luxury|high[- ]?end|splurge|five[- ]?star)\b/.test(lower)) trip.budget = "luxury";
+  else if (/\b(mid|moderate|mid[- ]?range|mid[- ]?budget)\b/.test(lower)) trip.budget = "mid-range";
+  else if (/\b(budget|cheap|backpack|low[- ]?cost)\b/.test(lower)) trip.budget = "budget";
+
+  if (/\b(relaxed|slow|chill|easy)\b/.test(lower)) trip.style = "relaxed";
+  else if (/\b(packed|busy|fast|intense)\b/.test(lower)) trip.style = "packed";
+
+  const interestMap = [
+    ["Food", /food|eat|restaurant|culinary|foodie|cuisine|tapas/],
+    ["Nightlife", /night|bar|club|party/],
+    ["History", /history|historic|ancient|ruins/],
+    ["Art & museums", /art|museum|gallery/],
+    ["Nature", /nature|park|hike|outdoor|mountain|lake/],
+    ["Shopping", /shop|market|boutique/],
+    ["Beaches", /beach|coast|sea/],
+    ["Architecture", /architect|cathedral|palace/],
+  ];
+  trip.interests = interestMap.filter(([, re]) => re.test(lower)).map(([tag]) => tag);
+  return trip;
+}
+
+function cleanStr(x) {
+  return String(x || "").replace(/\s+/g, " ").trim();
+}
+
+// Calls our own backend, which talks to Tavily server-side (keys never reach the browser).
+async function researchSection(trip, section) {
   const res = await fetch("/api/research", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ place, section }),
+    body: JSON.stringify({
+      place: trip.destination,
+      section,
+      trip: {
+        days: trip.days,
+        budget: trip.budget,
+        style: trip.style,
+        interests: trip.interests,
+        season: trip.season,
+      },
+    }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -112,6 +178,31 @@ function Skeleton() {
   );
 }
 
+function ItinerarySkeleton({ label = "Building your day-by-day plan..." }) {
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2 text-sm text-slate-500">
+        <Loader2 className="h-4 w-4 animate-spin text-teal-700" /> {label}
+      </div>
+      <div className="animate-pulse space-y-4">
+        {[0, 1, 2].map((d) => (
+          <div key={d} className="rounded-xl border border-slate-200 bg-white p-4">
+            <div className="mb-3 flex items-center gap-3">
+              <div className="h-9 w-9 rounded-lg bg-slate-200" />
+              <div className="h-4 w-40 rounded bg-slate-200" />
+            </div>
+            <div className="space-y-2">
+              {[0, 1, 2, 3].map((s) => (
+                <div key={s} className="h-10 rounded-lg bg-slate-100" />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ErrorBox({ msg, onRetry }) {
   return (
     <Card className="p-6">
@@ -119,14 +210,9 @@ function ErrorBox({ msg, onRetry }) {
         <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
         <div>
           <p className="text-sm font-medium text-slate-800">{msg}</p>
-          <p className="mt-1 text-sm text-slate-500">
-            Live research uses web search and can occasionally miss. Try again.
-          </p>
+          <p className="mt-1 text-sm text-slate-500">Live research uses web search and can occasionally miss. Try again.</p>
           {onRetry && (
-            <button
-              onClick={onRetry}
-              className="mt-3 inline-flex items-center gap-2 rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-800"
-            >
+            <button onClick={onRetry} className="mt-3 inline-flex items-center gap-2 rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-800">
               <RefreshCw className="h-4 w-4" /> Retry
             </button>
           )}
@@ -136,26 +222,35 @@ function ErrorBox({ msg, onRetry }) {
   );
 }
 
+function EmptyState({ icon: Icon = Compass, title, hint, onRetry }) {
+  return (
+    <Card className="p-8 text-center">
+      <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-100 text-slate-400">
+        <Icon className="h-6 w-6" />
+      </div>
+      <p className="mt-3 text-sm font-medium text-slate-700">{title}</p>
+      {hint && <p className="mx-auto mt-1 max-w-sm text-sm text-slate-500">{hint}</p>}
+      {onRetry && (
+        <button onClick={onRetry} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:border-teal-300 hover:text-teal-700">
+          <RefreshCw className="h-4 w-4" /> Try again
+        </button>
+      )}
+    </Card>
+  );
+}
+
 function LastChecked({ data }) {
   if (!data) return null;
   return (
     <div className="mt-6 flex flex-col gap-2 border-t border-slate-100 pt-4 text-xs text-slate-400">
       <div className="flex items-center gap-1.5">
-        <Clock className="h-3.5 w-3.5" />
-        Last checked: {val(data.lastChecked)}
+        <Clock className="h-3.5 w-3.5" /> Last checked: {val(data.lastChecked)}
       </div>
       {Array.isArray(data.sources) && data.sources.length > 0 && (
         <div className="flex flex-wrap gap-x-4 gap-y-1">
           {data.sources.map((s, i) => (
-            <a
-              key={i}
-              href={s.url}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 text-teal-700 hover:underline"
-            >
-              <ExternalLink className="h-3 w-3" />
-              {s.title || "Source"}
+            <a key={i} href={s.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-teal-700 hover:underline">
+              <ExternalLink className="h-3 w-3" /> {s.title || "Source"}
             </a>
           ))}
         </div>
@@ -180,74 +275,94 @@ function SaveButton({ isSaved, onClick, label = "Save" }) {
   );
 }
 
+function Segmented({ options, value, onChange }) {
+  return (
+    <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+      {options.map((o) => (
+        <button
+          key={o.id}
+          type="button"
+          onClick={() => onChange(o.id)}
+          className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+            value === o.id ? "bg-white text-teal-700 shadow-sm" : "text-slate-500 hover:text-slate-700"
+          }`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /* ------------------------------ app -------------------------------- */
 
 export default function App() {
+  const [trip, setTrip] = useState(() => loadLS(TRIP_KEY, null));
   const [query, setQuery] = useState("");
-  const [place, setPlace] = useState(null);
-  const [cache, setCache] = useState({}); // { placeKey: { section: data } }
-  const [loading, setLoading] = useState({}); // { section: bool }
-  const [errors, setErrors] = useState({}); // { section: msg }
+  const [cache, setCache] = useState({}); // { tripKey: { section: data } }
+  const [loading, setLoading] = useState({});
+  const [errors, setErrors] = useState({});
   const [tab, setTab] = useState("overview");
   const [saved, setSaved] = useState(() => loadLS(SAVED_KEY, []));
-  const [days, setDays] = useState(() => loadLS(DAYS_KEY, []));
   const [drawer, setDrawer] = useState(false);
   const [prioFilter, setPrioFilter] = useState("all");
+  const [showForm, setShowForm] = useState(false);
 
   useEffect(() => saveLS(SAVED_KEY, saved), [saved]);
-  useEffect(() => saveLS(DAYS_KEY, days), [days]);
+  useEffect(() => { if (trip) saveLS(TRIP_KEY, trip); }, [trip]);
 
-  const placeData = place ? cache[place] || {} : {};
+  const place = trip?.destination || null;
+  const dataKey = trip ? tripKey(trip) : "";
+  const placeData = dataKey ? cache[dataKey] || {} : {};
 
   const ensureSection = useCallback(
-    async (key, section) => {
-      if (cache[key] && cache[key][section]) return;
+    async (section) => {
+      if (!trip) return;
+      const k = tripKey(trip);
+      if (cache[k] && cache[k][section]) return;
       setLoading((l) => ({ ...l, [section]: true }));
       setErrors((e) => ({ ...e, [section]: null }));
       try {
-        const data = await researchSection(key, section);
-        setCache((c) => ({ ...c, [key]: { ...(c[key] || {}), [section]: data } }));
+        const data = await researchSection(trip, section);
+        setCache((c) => ({ ...c, [k]: { ...(c[k] || {}), [section]: data } }));
       } catch (err) {
         setErrors((e) => ({ ...e, [section]: err.message || "Could not load this section." }));
       } finally {
         setLoading((l) => ({ ...l, [section]: false }));
       }
     },
-    [cache]
+    [trip, cache]
   );
 
   useEffect(() => {
     const t = TABS.find((x) => x.id === tab);
-    if (place && t && t.needsPlace) ensureSection(place, tab);
-  }, [tab, place, ensureSection]);
+    if (trip && t && t.needsPlace) ensureSection(tab);
+  }, [tab, trip, ensureSection]);
+
+  function startTrip(nextTrip) {
+    if (!nextTrip || !nextTrip.destination) return;
+    setTrip(nextTrip);
+    setQuery(nextTrip.destination);
+    setTab("overview");
+    setShowForm(false);
+    setDrawer(false);
+  }
 
   function runSearch(q) {
-    const key = (q ?? query).trim();
-    if (!key) return;
-    setPlace(key);
-    setQuery(key);
-    setTab("overview");
-    setDrawer(false);
+    const parsed = parseTripQuery(q ?? query);
+    if (!parsed) return;
+    startTrip(parsed);
   }
 
   function addSaved(item) {
     setSaved((s) => {
       if (s.some((x) => x.name === item.name && x.category === item.category)) return s;
-      return [...s, { id: uid(), priority: "nice", notes: "", dayId: null, slot: null, ...item }];
+      return [...s, { id: uid(), priority: "nice", notes: "", ...item }];
     });
   }
   const isSaved = (name, category) => saved.some((x) => x.name === name && x.category === category);
   const updateSaved = (id, patch) => setSaved((s) => s.map((x) => (x.id === id ? { ...x, ...patch } : x)));
   const removeSaved = (id) => setSaved((s) => s.filter((x) => x.id !== id));
-
-  function addDay() {
-    setDays((d) => [...d, { id: uid(), label: `Day ${d.length + 1}`, travelNotes: "" }]);
-  }
-  const updateDay = (id, patch) => setDays((d) => d.map((x) => (x.id === id ? { ...x, ...patch } : x)));
-  function removeDay(id) {
-    setDays((d) => d.filter((x) => x.id !== id));
-    setSaved((s) => s.map((x) => (x.dayId === id ? { ...x, dayId: null, slot: null } : x)));
-  }
 
   const overview = placeData.overview;
   const filteredSaved = saved.filter((s) => prioFilter === "all" || s.priority === prioFilter);
@@ -256,7 +371,7 @@ export default function App() {
 
   function renderOverview() {
     if (loading.overview) return <Skeleton />;
-    if (errors.overview) return <ErrorBox msg={errors.overview} onRetry={() => ensureSection(place, "overview")} />;
+    if (errors.overview) return <ErrorBox msg={errors.overview} onRetry={() => ensureSection("overview")} />;
     if (!overview) return null;
     const savedHere = isSaved(val(overview.destination), "Destination");
     const savedItem = saved.find((x) => x.name === val(overview.destination) && x.category === "Destination");
@@ -272,15 +387,7 @@ export default function App() {
           <SaveButton
             isSaved={savedHere}
             label="Save place"
-            onClick={() =>
-              addSaved({
-                name: val(overview.destination),
-                category: "Destination",
-                location: val(overview.location),
-                whyGo: val(overview.whyWorthVisiting),
-                area: "",
-              })
-            }
+            onClick={() => addSaved({ name: val(overview.destination), category: "Destination", location: val(overview.location), whyGo: val(overview.whyWorthVisiting), area: "" })}
           />
         </div>
 
@@ -316,11 +423,17 @@ export default function App() {
           </div>
         </div>
 
+        <div className="mt-8">
+          <button onClick={() => setTab("itinerary")} className="inline-flex items-center gap-2 rounded-lg bg-teal-700 px-4 py-2 text-sm font-medium text-white hover:bg-teal-800">
+            <Calendar className="h-4 w-4" /> See your day-by-day itinerary
+          </button>
+        </div>
+
         {savedHere && savedItem && (
           <div className="mt-8">
             <h3 className="text-lg font-semibold text-slate-800">Save to trip</h3>
             <Card className="mt-3 p-4">
-              <SavedControls item={savedItem} days={days} onUpdate={updateSaved} onRemove={removeSaved} />
+              <SavedControls item={savedItem} onUpdate={updateSaved} onRemove={removeSaved} />
             </Card>
           </div>
         )}
@@ -330,25 +443,112 @@ export default function App() {
     );
   }
 
+  function renderItinerary() {
+    const d = placeData.itinerary;
+    if (loading.itinerary) return <ItinerarySkeleton />;
+    if (errors.itinerary) return <ErrorBox msg={errors.itinerary} onRetry={() => ensureSection("itinerary")} />;
+    if (!d) return <EmptyState icon={Calendar} title="No itinerary yet" hint="Search a destination to generate a day-by-day plan." />;
+    const plan = d.itinerary || [];
+    if (plan.length === 0)
+      return <EmptyState icon={Calendar} title="Couldn't build a plan this time" hint="This can happen on very obscure places or during a rate limit. Try again." onRetry={() => ensureSection("itinerary")} />;
+
+    return (
+      <div>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <SectionTitle icon={Calendar} title={`Your ${val(d.tripLength)} in ${val(d.destination)}`} />
+          <CopyItineraryButton data={d} />
+        </div>
+        <p className="mt-2 text-sm text-slate-500">
+          A day-by-day plan built from live results, tuned to your {d.budgetLevel} budget and {d.travelStyle} pace
+          {Array.isArray(d.interests) && d.interests.length > 0 ? ` with a focus on ${d.interests.join(", ").toLowerCase()}` : ""}.
+        </p>
+
+        {Array.isArray(d.savedSuggestions) && d.savedSuggestions.length > 0 && (
+          <Card className="mt-5 p-4">
+            <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Suggested saves</div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {d.savedSuggestions.map((s, i) => {
+                const on = isSaved(val(s.name), s.category);
+                return (
+                  <button
+                    key={i}
+                    onClick={() => addSaved({ name: val(s.name), category: s.category, location: place, whyGo: s.why, area: "" })}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm transition ${
+                      on ? "border-teal-200 bg-teal-50 text-teal-700" : "border-slate-200 bg-white text-slate-600 hover:border-teal-300 hover:text-teal-700"
+                    }`}
+                    title={s.why}
+                  >
+                    {on ? <BookmarkCheck className="h-3.5 w-3.5" /> : <Bookmark className="h-3.5 w-3.5" />}
+                    {s.name}
+                  </button>
+                );
+              })}
+            </div>
+          </Card>
+        )}
+
+        <div className="mt-6 space-y-5">
+          {plan.map((day) => (
+            <Card key={day.day} className="overflow-hidden">
+              <div className="flex items-center gap-3 border-b border-slate-100 bg-slate-50/70 px-4 py-3">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-teal-700 text-sm font-semibold text-white">{day.day}</div>
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-teal-700">Day {day.day}</div>
+                  <div className="truncate font-semibold text-slate-900">{val(day.title)}</div>
+                </div>
+              </div>
+              {day.summary && <p className="px-4 pt-3 text-sm text-slate-500">{day.summary}</p>}
+              <div className="divide-y divide-slate-100 px-4 py-1">
+                {(day.slots || []).map((s, i) => {
+                  const Icon = SLOT_ICON[s.slot] || Clock;
+                  const on = isSaved(val(s.name), "Activity");
+                  return (
+                    <div key={i} className="flex items-start gap-3 py-3">
+                      <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-slate-100 text-slate-500">
+                        <Icon className="h-4 w-4" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">{s.slot}</div>
+                        <div className="font-medium text-slate-800">{val(s.name)}</div>
+                        {s.detail && <div className="mt-0.5 text-sm text-slate-500">{s.detail}</div>}
+                      </div>
+                      <button
+                        onClick={() => addSaved({ name: val(s.name), category: "Activity", location: place, whyGo: s.slot, area: "" })}
+                        className={`shrink-0 rounded-md border p-1.5 transition ${
+                          on ? "border-teal-200 bg-teal-50 text-teal-700" : "border-slate-200 text-slate-400 hover:border-teal-300 hover:text-teal-700"
+                        }`}
+                        title={on ? "Saved" : "Save to trip"}
+                      >
+                        {on ? <BookmarkCheck className="h-4 w-4" /> : <Bookmark className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          ))}
+        </div>
+
+        <LastChecked data={d} />
+      </div>
+    );
+  }
+
   function renderStay() {
     const d = placeData.stay;
     if (loading.stay) return <Skeleton />;
-    if (errors.stay) return <ErrorBox msg={errors.stay} onRetry={() => ensureSection(place, "stay")} />;
+    if (errors.stay) return <ErrorBox msg={errors.stay} onRetry={() => ensureSection("stay")} />;
     if (!d) return null;
+    if (!(d.areas || []).length) return <EmptyState icon={Bed} title="No neighborhoods found" hint="Try again in a moment; live search occasionally returns thin results." onRetry={() => ensureSection("stay")} />;
     return (
       <div>
         <SectionTitle icon={Bed} title="Where to stay" />
         <div className="mt-4 grid gap-4 md:grid-cols-2">
-          {(d.areas || []).map((a, i) => (
+          {d.areas.map((a, i) => (
             <Card key={i} className="flex flex-col p-4">
               <div className="flex items-start justify-between gap-2">
                 <h4 className="font-semibold text-slate-900">{val(a.area)}</h4>
-                <SaveButton
-                  isSaved={isSaved(val(a.area), "Stay")}
-                  onClick={() =>
-                    addSaved({ name: val(a.area), category: "Stay", location: val(overview?.location), whyGo: val(a.bestFor), area: val(a.area) })
-                  }
-                />
+                <SaveButton isSaved={isSaved(val(a.area), "Stay")} onClick={() => addSaved({ name: val(a.area), category: "Stay", location: place, whyGo: val(a.bestFor), area: val(a.area) })} />
               </div>
               <p className="mt-2 text-sm text-slate-600"><span className="font-medium text-slate-700">Best for:</span> {val(a.bestFor)}</p>
               <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
@@ -370,13 +570,14 @@ export default function App() {
   function renderDo() {
     const d = placeData.do;
     if (loading.do) return <Skeleton />;
-    if (errors.do) return <ErrorBox msg={errors.do} onRetry={() => ensureSection(place, "do")} />;
+    if (errors.do) return <ErrorBox msg={errors.do} onRetry={() => ensureSection("do")} />;
     if (!d) return null;
+    if (!(d.items || []).length) return <EmptyState icon={Compass} title="No activities found" hint="Live search came back thin. Give it another try." onRetry={() => ensureSection("do")} />;
     return (
       <div>
         <SectionTitle icon={Compass} title="Things to do" />
         <div className="mt-4 space-y-3">
-          {(d.items || []).map((it, i) => (
+          {d.items.map((it, i) => (
             <Card key={i} className="p-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
@@ -390,12 +591,7 @@ export default function App() {
                     <span>Booking: {val(it.booking)}</span>
                   </div>
                 </div>
-                <SaveButton
-                  isSaved={isSaved(val(it.name), "Activity")}
-                  onClick={() =>
-                    addSaved({ name: val(it.name), category: "Activity", location: val(overview?.location), whyGo: val(it.type), area: "" })
-                  }
-                />
+                <SaveButton isSaved={isSaved(val(it.name), "Activity")} onClick={() => addSaved({ name: val(it.name), category: "Activity", location: place, whyGo: val(it.type), area: "" })} />
               </div>
             </Card>
           ))}
@@ -408,13 +604,14 @@ export default function App() {
   function renderEat() {
     const d = placeData.eat;
     if (loading.eat) return <Skeleton />;
-    if (errors.eat) return <ErrorBox msg={errors.eat} onRetry={() => ensureSection(place, "eat")} />;
+    if (errors.eat) return <ErrorBox msg={errors.eat} onRetry={() => ensureSection("eat")} />;
     if (!d) return null;
+    if (!(d.items || []).length) return <EmptyState icon={Utensils} title="No food spots found" hint="Live search came back thin. Give it another try." onRetry={() => ensureSection("eat")} />;
     return (
       <div>
         <SectionTitle icon={Utensils} title="Where to eat" />
         <div className="mt-4 grid gap-3 md:grid-cols-2">
-          {(d.items || []).map((it, i) => (
+          {d.items.map((it, i) => (
             <Card key={i} className="p-4">
               <div className="flex items-start justify-between gap-2">
                 <div>
@@ -428,12 +625,7 @@ export default function App() {
                     <span>Reservation: {val(it.reservation)}</span>
                   </div>
                 </div>
-                <SaveButton
-                  isSaved={isSaved(val(it.name), "Food")}
-                  onClick={() =>
-                    addSaved({ name: val(it.name), category: "Food", location: val(overview?.location), whyGo: val(it.whatToOrder), area: "" })
-                  }
-                />
+                <SaveButton isSaved={isSaved(val(it.name), "Food")} onClick={() => addSaved({ name: val(it.name), category: "Food", location: place, whyGo: val(it.whatToOrder), area: "" })} />
               </div>
             </Card>
           ))}
@@ -446,13 +638,14 @@ export default function App() {
   function renderLocal() {
     const d = placeData.local;
     if (loading.local) return <Skeleton />;
-    if (errors.local) return <ErrorBox msg={errors.local} onRetry={() => ensureSection(place, "local")} />;
+    if (errors.local) return <ErrorBox msg={errors.local} onRetry={() => ensureSection("local")} />;
     if (!d) return null;
+    if (!(d.items || []).length) return <EmptyState icon={Gift} title="No local tips found" hint="Live search came back thin. Give it another try." onRetry={() => ensureSection("local")} />;
     return (
       <div>
-        <SectionTitle icon={Gift} title="Local specialties" />
+        <SectionTitle icon={Gift} title="Local tips & specialties" />
         <div className="mt-4 grid gap-3 md:grid-cols-2">
-          {(d.items || []).map((it, i) => (
+          {d.items.map((it, i) => (
             <Card key={i} className="p-4">
               <div className="flex items-center gap-2">
                 <h4 className="font-semibold text-slate-900">{val(it.name)}</h4>
@@ -471,7 +664,7 @@ export default function App() {
   function renderLogistics() {
     const d = placeData.logistics;
     if (loading.logistics) return <Skeleton />;
-    if (errors.logistics) return <ErrorBox msg={errors.logistics} onRetry={() => ensureSection(place, "logistics")} />;
+    if (errors.logistics) return <ErrorBox msg={errors.logistics} onRetry={() => ensureSection("logistics")} />;
     if (!d) return null;
     const rows = [
       ["Airport / train access", d.airportTrain],
@@ -490,101 +683,6 @@ export default function App() {
           ))}
         </div>
         <LastChecked data={d} />
-      </div>
-    );
-  }
-
-  function renderItinerary() {
-    return (
-      <div>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <SectionTitle icon={Calendar} title="Itinerary builder" />
-          <button onClick={addDay} className="inline-flex items-center gap-1.5 rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-800">
-            <Plus className="h-4 w-4" /> Add day
-          </button>
-        </div>
-
-        {saved.length === 0 && (
-          <p className="mt-4 text-sm text-slate-500">Save places first, then assign them to a day and time slot below.</p>
-        )}
-
-        {saved.length > 0 && (
-          <Card className="mt-4 p-4">
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Assign saved places</div>
-            <div className="mt-3 space-y-2">
-              {saved.map((s) => (
-                <div key={s.id} className="flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 p-2">
-                  <span className={`h-2 w-2 shrink-0 rounded-full ${(PRIO[s.priority] || PRIO.nice).dot}`} />
-                  <span className="min-w-0 flex-1 truncate text-sm text-slate-700">{s.name}</span>
-                  <select
-                    value={s.dayId || ""}
-                    onChange={(e) => updateSaved(s.id, { dayId: e.target.value || null })}
-                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600"
-                  >
-                    <option value="">No day</option>
-                    {days.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
-                  </select>
-                  <select
-                    value={s.slot || ""}
-                    onChange={(e) => updateSaved(s.id, { slot: e.target.value || null })}
-                    className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600"
-                  >
-                    <option value="">Slot</option>
-                    {SLOTS.map((sl) => <option key={sl.id} value={sl.id}>{sl.label}</option>)}
-                  </select>
-                </div>
-              ))}
-            </div>
-          </Card>
-        )}
-
-        <div className="mt-6 space-y-6">
-          {days.map((day) => (
-            <Card key={day.id} className="p-4">
-              <div className="flex items-center gap-2">
-                <input
-                  value={day.label}
-                  onChange={(e) => updateDay(day.id, { label: e.target.value })}
-                  className="flex-1 rounded-md border border-transparent bg-transparent text-lg font-semibold text-slate-900 hover:border-slate-200 focus:border-slate-300 focus:outline-none"
-                />
-                <button onClick={() => removeDay(day.id)} className="rounded-md p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-500">
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                {SLOTS.map((sl) => {
-                  const items = saved.filter((s) => s.dayId === day.id && s.slot === sl.id);
-                  const Icon = sl.icon;
-                  return (
-                    <div key={sl.id} className="rounded-lg border border-slate-100 bg-slate-50 p-3">
-                      <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-500">
-                        <Icon className="h-4 w-4" /> {sl.label}
-                      </div>
-                      <div className="mt-2 space-y-1">
-                        {items.length === 0 ? (
-                          <p className="text-xs text-slate-400">Nothing yet</p>
-                        ) : (
-                          items.map((it) => (
-                            <div key={it.id} className="rounded bg-white px-2 py-1 text-sm text-slate-700 shadow-sm">{it.name}</div>
-                          ))
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="mt-3">
-                <textarea
-                  value={day.travelNotes}
-                  onChange={(e) => updateDay(day.id, { travelNotes: e.target.value })}
-                  placeholder="Travel notes (transfers, timing, tickets)..."
-                  rows={2}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-teal-400 focus:outline-none"
-                />
-              </div>
-            </Card>
-          ))}
-        </div>
       </div>
     );
   }
@@ -614,7 +712,7 @@ export default function App() {
         </div>
 
         {list.length === 0 ? (
-          <p className="mt-6 text-sm text-slate-500">No saved places yet. Search a destination and tap Save.</p>
+          <EmptyState icon={Bookmark} title="No saved places yet" hint="Search a destination, open the itinerary, and tap the bookmark on anything you want to keep." />
         ) : (
           <div className="mt-4 overflow-x-auto">
             <table className="w-full min-w-[720px] border-collapse text-sm">
@@ -635,11 +733,7 @@ export default function App() {
                     <td className="py-3 pr-3 font-medium text-slate-800">{s.name}</td>
                     <td className="py-3 pr-3"><Badge>{s.category}</Badge></td>
                     <td className="py-3 pr-3">
-                      <select
-                        value={s.priority}
-                        onChange={(e) => updateSaved(s.id, { priority: e.target.value })}
-                        className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600"
-                      >
+                      <select value={s.priority} onChange={(e) => updateSaved(s.id, { priority: e.target.value })} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600">
                         <option value="must">Must-go</option>
                         <option value="nice">Nice-to-have</option>
                         <option value="skip">Skip</option>
@@ -648,12 +742,7 @@ export default function App() {
                     <td className="py-3 pr-3 text-slate-600">{s.whyGo}</td>
                     <td className="py-3 pr-3 text-slate-600">{s.area || "-"}</td>
                     <td className="py-3 pr-3">
-                      <input
-                        value={s.notes}
-                        onChange={(e) => updateSaved(s.id, { notes: e.target.value })}
-                        placeholder="Add a note..."
-                        className="w-40 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 focus:border-teal-400 focus:outline-none"
-                      />
+                      <input value={s.notes} onChange={(e) => updateSaved(s.id, { notes: e.target.value })} placeholder="Add a note..." className="w-40 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 focus:border-teal-400 focus:outline-none" />
                     </td>
                     <td className="py-3">
                       <button onClick={() => removeSaved(s.id)} className="rounded-md p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-500">
@@ -671,7 +760,7 @@ export default function App() {
   }
 
   const activeTab = TABS.find((t) => t.id === tab);
-  const needPlacePrompt = activeTab?.needsPlace && !place;
+  const showWelcome = !trip && activeTab?.needsPlace;
 
   /* ------------------------------ shell ---------------------------- */
 
@@ -688,7 +777,7 @@ export default function App() {
             </div>
             <div className="leading-tight">
               <div className="font-serif text-lg font-semibold text-slate-900">Atlas</div>
-              <div className="hidden text-xs text-slate-400 sm:block">travel research desk</div>
+              <div className="hidden text-xs text-slate-400 sm:block">trip planner</div>
             </div>
           </div>
 
@@ -698,27 +787,18 @@ export default function App() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && runSearch()}
-              placeholder="Search a place, city, dish, or neighborhood..."
+              placeholder="Try: Madrid, 4 days, mid-budget, food and nightlife"
               className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-9 pr-24 text-sm text-slate-800 placeholder-slate-400 focus:border-teal-400 focus:bg-white focus:outline-none"
             />
-            <button
-              onClick={() => runSearch()}
-              className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-800"
-            >
-              Search
+            <button onClick={() => runSearch()} className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-lg bg-teal-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-teal-800">
+              Plan
             </button>
           </div>
         </div>
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <Sidebar
-          open={drawer}
-          onClose={() => setDrawer(false)}
-          saved={saved}
-          onRemove={removeSaved}
-          onOpenPlace={(name) => runSearch(name)}
-        />
+        <Sidebar open={drawer} onClose={() => setDrawer(false)} saved={saved} onRemove={removeSaved} onOpenPlace={(name) => runSearch(name)} />
 
         <main className="min-w-0 flex-1 overflow-y-auto">
           <div className="sticky top-0 z-10 border-b border-slate-200 bg-white/90 backdrop-blur">
@@ -742,24 +822,28 @@ export default function App() {
           </div>
 
           <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6 sm:py-8">
-            {place && (
-              <p className="mb-5 flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                <Info className="h-3.5 w-3.5 shrink-0" />
-                AI-researched with live web search. Double-check hours, prices, and bookings before you go.
-              </p>
-            )}
-
-            {needPlacePrompt ? (
-              <WelcomeState onPick={(q) => runSearch(q)} />
+            {showForm ? (
+              <TripForm initial={trip} onSubmit={startTrip} onCancel={() => setShowForm(false)} />
+            ) : showWelcome ? (
+              <WelcomeState onStart={startTrip} onQuick={(q) => runSearch(q)} />
             ) : (
               <>
+                {trip && (
+                  <>
+                    <TripSummaryBar trip={trip} onEdit={() => setShowForm(true)} />
+                    <p className="mb-5 flex items-center gap-1.5 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      <Info className="h-3.5 w-3.5 shrink-0" />
+                      AI-researched with live web search. Double-check hours, prices, and bookings before you go.
+                    </p>
+                  </>
+                )}
                 {tab === "overview" && renderOverview()}
+                {tab === "itinerary" && renderItinerary()}
                 {tab === "stay" && renderStay()}
                 {tab === "do" && renderDo()}
                 {tab === "eat" && renderEat()}
                 {tab === "local" && renderLocal()}
                 {tab === "logistics" && renderLogistics()}
-                {tab === "itinerary" && renderItinerary()}
                 {tab === "trip" && renderTrip()}
               </>
             )}
@@ -780,26 +864,155 @@ function SectionTitle({ icon: Icon, title }) {
   );
 }
 
-function WelcomeState({ onPick }) {
+function TripForm({ initial, onSubmit, onCancel }) {
+  const [destination, setDestination] = useState(initial?.destination || "");
+  const [days, setDays] = useState(initial?.days || 3);
+  const [budget, setBudget] = useState(initial?.budget || "mid-range");
+  const [style, setStyle] = useState(initial?.style || "balanced");
+  const [interests, setInterests] = useState(initial?.interests || []);
+  const [season, setSeason] = useState(initial?.season || "");
+
+  const toggle = (t) => setInterests((xs) => (xs.includes(t) ? xs.filter((x) => x !== t) : [...xs, t]));
+  const submit = () => {
+    if (!destination.trim()) return;
+    onSubmit({ destination: destination.trim(), days: Math.min(10, Math.max(1, Number(days) || 3)), budget, style, interests, season });
+  };
+
   return (
-    <div className="py-8 text-center">
-      <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-teal-50 text-teal-700">
-        <Compass className="h-7 w-7" />
+    <Card className="p-5 sm:p-6">
+      <h2 className="font-serif text-2xl font-semibold text-slate-900">Plan a trip</h2>
+      <p className="mt-1 text-sm text-slate-500">Give Atlas the basics and get a full plan with a day-by-day itinerary.</p>
+
+      <div className="mt-5 grid gap-4 sm:grid-cols-2">
+        <div className="sm:col-span-2">
+          <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">Destination</label>
+          <input
+            value={destination}
+            onChange={(e) => setDestination(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+            placeholder="City, region, or country"
+            className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:border-teal-400 focus:outline-none"
+          />
+        </div>
+
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">Trip length (days)</label>
+          <input
+            type="number" min={1} max={10} value={days}
+            onChange={(e) => setDays(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2.5 text-sm text-slate-800 focus:border-teal-400 focus:outline-none"
+          />
+        </div>
+
+        <div>
+          <label className="text-xs font-semibold uppercase tracking-wide text-slate-400">Season (optional)</label>
+          <select value={season} onChange={(e) => setSeason(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-800 focus:border-teal-400 focus:outline-none">
+            {SEASONS.map((s) => (
+              <option key={s || "any"} value={s}>{s || "Any / not sure"}</option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Budget</div>
+          <div className="mt-1"><Segmented options={BUDGETS} value={budget} onChange={setBudget} /></div>
+        </div>
+
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Pace</div>
+          <div className="mt-1"><Segmented options={STYLES} value={style} onChange={setStyle} /></div>
+        </div>
       </div>
-      <h2 className="mt-4 font-serif text-2xl font-semibold text-slate-900">Research any place you found online</h2>
-      <p className="mx-auto mt-2 max-w-md text-sm text-slate-500">
-        Type a destination, attraction, neighborhood, or dish. Atlas pulls real, sourced travel info you can save into a trip.
-      </p>
-      <div className="mx-auto mt-6 flex max-w-xl flex-wrap justify-center gap-2">
-        {EXAMPLES.map((e) => (
-          <button
-            key={e}
-            onClick={() => onPick(e)}
-            className="rounded-full border border-slate-200 bg-white px-3.5 py-1.5 text-sm text-slate-600 transition hover:border-teal-300 hover:text-teal-700"
-          >
-            {e}
-          </button>
+
+      <div className="mt-5">
+        <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Interests</div>
+        <div className="mt-2 flex flex-wrap gap-2">
+          {INTERESTS.map((t) => {
+            const on = interests.includes(t);
+            return (
+              <button
+                key={t}
+                type="button"
+                onClick={() => toggle(t)}
+                className={`rounded-full border px-3 py-1.5 text-sm transition ${
+                  on ? "border-teal-300 bg-teal-50 text-teal-700" : "border-slate-200 bg-white text-slate-600 hover:border-teal-300"
+                }`}
+              >
+                {t}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="mt-6 flex flex-wrap gap-2">
+        <button onClick={submit} disabled={!destination.trim()} className="inline-flex items-center gap-2 rounded-lg bg-teal-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-teal-800 disabled:opacity-40">
+          <Calendar className="h-4 w-4" /> Build my plan
+        </button>
+        {onCancel && (
+          <button onClick={onCancel} className="rounded-lg border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 hover:border-slate-300">Cancel</button>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function TripSummaryBar({ trip, onEdit }) {
+  const chips = [
+    { icon: Calendar, text: `${trip.days} day${trip.days > 1 ? "s" : ""}` },
+    { icon: Wallet, text: BUDGETS.find((b) => b.id === trip.budget)?.label || trip.budget },
+    { icon: Users, text: STYLES.find((s) => s.id === trip.style)?.label || trip.style },
+    ...(trip.season ? [{ icon: Sun, text: trip.season }] : []),
+  ];
+  return (
+    <div className="mb-5 flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-3">
+      <span className="flex items-center gap-1.5 font-serif text-lg font-semibold text-slate-900">
+        <MapPin className="h-4 w-4 text-teal-700" /> {trip.destination}
+      </span>
+      <div className="flex flex-wrap gap-1.5">
+        {chips.map((c, i) => {
+          const Icon = c.icon;
+          return (
+            <span key={i} className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-xs font-medium text-slate-600">
+              <Icon className="h-3 w-3" /> {c.text}
+            </span>
+          );
+        })}
+        {(trip.interests || []).map((t) => (
+          <Badge key={t} cls="bg-teal-50 text-teal-700 border-teal-100">{t}</Badge>
         ))}
+      </div>
+      <button onClick={onEdit} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:border-teal-300 hover:text-teal-700">
+        <Pencil className="h-3.5 w-3.5" /> Edit trip
+      </button>
+    </div>
+  );
+}
+
+function WelcomeState({ onStart, onQuick }) {
+  return (
+    <div>
+      <div className="py-2 text-center">
+        <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-teal-50 text-teal-700">
+          <Compass className="h-7 w-7" />
+        </div>
+        <h2 className="mt-4 font-serif text-2xl font-semibold text-slate-900">Plan a real trip, not just a search</h2>
+        <p className="mx-auto mt-2 max-w-md text-sm text-slate-500">
+          Tell Atlas where you're going and what you're into. It pulls live, sourced info and builds a day-by-day itinerary.
+        </p>
+      </div>
+
+      <div className="mt-6"><TripForm initial={null} onSubmit={onStart} /></div>
+
+      <div className="mt-6 text-center">
+        <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Or type it in one line</div>
+        <div className="mx-auto mt-3 flex max-w-2xl flex-wrap justify-center gap-2">
+          {EXAMPLES.map((e) => (
+            <button key={e} onClick={() => onQuick(e)} className="rounded-full border border-slate-200 bg-white px-3.5 py-1.5 text-sm text-slate-600 transition hover:border-teal-300 hover:text-teal-700">
+              {e}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -823,7 +1036,7 @@ function Sidebar({ open, onClose, saved, onRemove, onOpenPlace }) {
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         {saved.length === 0 ? (
-          <p className="px-1 py-4 text-xs text-slate-400">Nothing saved yet. Search a place and tap Save to build your list.</p>
+          <p className="px-1 py-4 text-xs text-slate-400">Nothing saved yet. Build a plan and tap the bookmark on anything you like.</p>
         ) : (
           Object.entries(grouped).map(([cat, items]) => (
             <div key={cat} className="mb-4">
@@ -865,53 +1078,22 @@ function Sidebar({ open, onClose, saved, onRemove, onOpenPlace }) {
   );
 }
 
-function SavedControls({ item, days, onUpdate, onRemove }) {
+function SavedControls({ item, onUpdate, onRemove }) {
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
         <div>
           <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Priority</div>
-          <select
-            value={item.priority}
-            onChange={(e) => onUpdate(item.id, { priority: e.target.value })}
-            className="mt-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700"
-          >
+          <select value={item.priority} onChange={(e) => onUpdate(item.id, { priority: e.target.value })} className="mt-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700">
             <option value="must">Must-go</option>
             <option value="nice">Nice-to-have</option>
             <option value="skip">Skip</option>
           </select>
         </div>
-        <div>
-          <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Add to day</div>
-          <div className="mt-1 flex gap-2">
-            <select
-              value={item.dayId || ""}
-              onChange={(e) => onUpdate(item.id, { dayId: e.target.value || null })}
-              className="rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700"
-            >
-              <option value="">No day</option>
-              {days.map((d) => <option key={d.id} value={d.id}>{d.label}</option>)}
-            </select>
-            <select
-              value={item.slot || ""}
-              onChange={(e) => onUpdate(item.id, { slot: e.target.value || null })}
-              className="rounded-md border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700"
-            >
-              <option value="">Slot</option>
-              {SLOTS.map((sl) => <option key={sl.id} value={sl.id}>{sl.label}</option>)}
-            </select>
-          </div>
-        </div>
       </div>
       <div>
         <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Personal notes</div>
-        <textarea
-          value={item.notes}
-          onChange={(e) => onUpdate(item.id, { notes: e.target.value })}
-          rows={2}
-          placeholder="Anything you want to remember..."
-          className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-teal-400 focus:outline-none"
-        />
+        <textarea value={item.notes} onChange={(e) => onUpdate(item.id, { notes: e.target.value })} rows={2} placeholder="Anything you want to remember..." className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-teal-400 focus:outline-none" />
       </div>
       <button onClick={() => onRemove(item.id)} className="inline-flex items-center gap-1.5 text-xs font-medium text-rose-500 hover:text-rose-600">
         <Trash2 className="h-3.5 w-3.5" /> Remove from trip
@@ -923,9 +1105,7 @@ function SavedControls({ item, days, onUpdate, onRemove }) {
 function CopyListButton({ saved }) {
   const [copied, setCopied] = useState(false);
   function copy() {
-    const text = saved
-      .map((s) => `${s.name} | ${s.category} | ${(PRIO[s.priority] || PRIO.nice).label}${s.notes ? " | " + s.notes : ""}`)
-      .join("\n");
+    const text = saved.map((s) => `${s.name} | ${s.category} | ${(PRIO[s.priority] || PRIO.nice).label}${s.notes ? " | " + s.notes : ""}`).join("\n");
     try {
       navigator.clipboard.writeText(text);
       setCopied(true);
@@ -935,13 +1115,34 @@ function CopyListButton({ saved }) {
     }
   }
   return (
-    <button
-      onClick={copy}
-      disabled={saved.length === 0}
-      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:border-teal-300 hover:text-teal-700 disabled:opacity-40"
-    >
+    <button onClick={copy} disabled={saved.length === 0} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:border-teal-300 hover:text-teal-700 disabled:opacity-40">
       {copied ? <Check className="h-4 w-4 text-teal-600" /> : <Copy className="h-4 w-4" />}
       {copied ? "Copied" : "Copy list"}
+    </button>
+  );
+}
+
+function CopyItineraryButton({ data }) {
+  const [copied, setCopied] = useState(false);
+  function copy() {
+    const lines = [`${data.destination} — ${data.tripLength}`, ""];
+    (data.itinerary || []).forEach((day) => {
+      lines.push(`Day ${day.day}: ${day.title}`);
+      (day.slots || []).forEach((s) => lines.push(`  ${s.slot}: ${s.name}${s.detail ? " — " + s.detail : ""}`));
+      lines.push("");
+    });
+    try {
+      navigator.clipboard.writeText(lines.join("\n"));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* ignore */
+    }
+  }
+  return (
+    <button onClick={copy} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-600 hover:border-teal-300 hover:text-teal-700">
+      {copied ? <Check className="h-4 w-4 text-teal-600" /> : <Copy className="h-4 w-4" />}
+      {copied ? "Copied" : "Copy plan"}
     </button>
   );
 }
