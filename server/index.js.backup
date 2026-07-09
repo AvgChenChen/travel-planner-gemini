@@ -1,0 +1,277 @@
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const PORT = process.env.PORT || 3001;
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || "llama3.2:3b";
+
+const cache = new Map();
+
+const SCHEMAS = {
+  overview: `{
+    "name": "",
+    "location": "City, Country",
+    "description": "",
+    "whyVisit": "",
+    "knownFor": "",
+    "bestTime": "",
+    "tripLength": "",
+    "budgetLevel": "Budget | Moderate | Luxury",
+    "styleTags": ["3-5 short tags"],
+    "coolFacts": ["5-8 short accurate facts"],
+    "lastChecked": "",
+    "sources": []
+  }`,
+
+  stay: `{
+    "areas": [
+      {
+        "area": "",
+        "bestFor": "",
+        "pros": "",
+        "cons": "",
+        "budget": "$ | $$ | $$$",
+        "safety": ""
+      }
+    ],
+    "lastChecked": "",
+    "sources": []
+  }`,
+
+  do: `{
+    "items": [
+      {
+        "name": "",
+        "type": "Main attraction | Hidden gem | Free | Paid | Day trip",
+        "description": "",
+        "timeNeeded": "",
+        "booking": "Yes | No | Recommended"
+      }
+    ],
+    "lastChecked": "",
+    "sources": []
+  }`,
+
+  eat: `{
+    "items": [
+      {
+        "name": "",
+        "type": "Local dish | Restaurant | Casual | Dessert/Cafe",
+        "whatToOrder": "",
+        "price": "$ | $$ | $$$",
+        "reservation": "Yes | No | Recommended"
+      }
+    ],
+    "lastChecked": "",
+    "sources": []
+  }`,
+
+  local: `{
+    "items": [
+      {
+        "name": "",
+        "category": "Food | Drink | Culture | Activity | Souvenir",
+        "why": "",
+        "where": ""
+      }
+    ],
+    "lastChecked": "",
+    "sources": []
+  }`,
+
+  logistics: `{
+    "airportTrain": "",
+    "localTransport": "",
+    "walkability": "",
+    "groupAreas": "",
+    "safetyTips": "",
+    "touristTraps": "",
+    "lastChecked": "",
+    "sources": []
+  }`,
+};
+
+function today() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function queryFor(place, section) {
+  const map = {
+    overview: `${place} travel guide overview known for best time to visit`,
+    stay: `${place} best neighborhoods where to stay safety convenience`,
+    do: `${place} best things to do attractions hidden gems day trips`,
+    eat: `${place} best restaurants local food what to eat`,
+    local: `${place} local specialties food drink culture souvenirs`,
+    logistics: `${place} airport train public transport safety tourist traps`,
+  };
+
+  return map[section] || `${place} travel guide`;
+}
+
+async function searchTavily(place, section) {
+  const res = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${TAVILY_API_KEY}`,
+    },
+    body: JSON.stringify({
+      query: queryFor(place, section),
+      search_depth: "basic",
+      max_results: 8,
+      include_answer: true,
+      include_raw_content: false,
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text();
+    console.error("Tavily error:", res.status, detail);
+    throw new Error("Tavily request failed. Check your TAVILY_API_KEY.");
+  }
+
+  return res.json();
+}
+
+function buildPrompt(place, section, tavilyData) {
+  const results = Array.isArray(tavilyData.results) ? tavilyData.results : [];
+
+  const sources = results.slice(0, 6).map((r, i) => ({
+    number: i + 1,
+    title: r.title || "Source",
+    url: r.url || "",
+    content: r.content || "",
+  }));
+
+  return `
+You are building a polished travel planning app.
+
+Place searched:
+${place}
+
+Section:
+${section}
+
+Today:
+${today()}
+
+Use only these search results as factual support.
+Do not invent restaurants, prices, hours, neighborhoods, history, or transport details.
+If the search results do not support something, write "Needs verification".
+Do not include markdown.
+Do not include hashtags.
+Do not include article titles as facts.
+Keep every field short and useful.
+Return valid JSON only.
+
+Required JSON shape:
+${SCHEMAS[section]}
+
+Search answer:
+${tavilyData.answer || "No answer provided"}
+
+Search sources:
+${JSON.stringify(sources, null, 2)}
+
+Source format in final JSON:
+"sources": [{"title":"Source title","url":"https://..."}]
+
+Return JSON only.
+`;
+}
+
+function extractJSON(text) {
+  const first = text.indexOf("{");
+  const last = text.lastIndexOf("}");
+  if (first === -1 || last === -1) throw new Error("No JSON found");
+  return JSON.parse(text.slice(first, last + 1));
+}
+
+async function askOllama(prompt) {
+  const res = await fetch("http://localhost:11434/api/generate", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: OLLAMA_MODEL,
+      prompt,
+      stream: false,
+      format: "json",
+      options: {
+        temperature: 0.1,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text();
+    console.error("Ollama error:", res.status, detail);
+    throw new Error("Ollama request failed. Make sure Ollama is open and the model is installed.");
+  }
+
+  const data = await res.json();
+  const text = data.response || "";
+  return extractJSON(text);
+}
+
+app.post("/api/research", async (req, res) => {
+  const { place, section } = req.body || {};
+
+  if (!place || !section || !SCHEMAS[section]) {
+    return res.status(400).json({ error: "Provide a valid place and section." });
+  }
+
+  if (!TAVILY_API_KEY) {
+    return res.status(500).json({ error: "Missing TAVILY_API_KEY. Add it to your .env file." });
+  }
+
+  const cacheKey = `${section}::${place.toLowerCase().trim()}`;
+  if (cache.has(cacheKey)) {
+    return res.json(cache.get(cacheKey));
+  }
+
+  try {
+    const tavilyData = await searchTavily(place, section);
+    const prompt = buildPrompt(place, section, tavilyData);
+    const parsed = await askOllama(prompt);
+
+    if (!parsed.lastChecked) parsed.lastChecked = today();
+
+    if (!Array.isArray(parsed.sources) || parsed.sources.length === 0) {
+      const results = Array.isArray(tavilyData.results) ? tavilyData.results : [];
+      parsed.sources = results.slice(0, 4).map((r) => ({
+        title: r.title || "Source",
+        url: r.url || "",
+      }));
+    }
+
+    cache.set(cacheKey, parsed);
+    res.json(parsed);
+  } catch (err) {
+    console.error("Research error:", err);
+    res.status(500).json({ error: err.message || "Research failed." });
+  }
+});
+
+app.get("/api/health", (_req, res) => {
+  res.json({
+    ok: true,
+    provider: "tavily+ollama",
+    model: OLLAMA_MODEL,
+  });
+});
+
+app.listen(PORT, () => {
+  console.log(`API running on http://localhost:${PORT}`);
+  console.log(`Using Tavily + local Ollama model: ${OLLAMA_MODEL}`);
+});
+
+
